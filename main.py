@@ -27,7 +27,7 @@ async def ingest_cache(request: IngestRequest):
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)}))
+raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def root():
