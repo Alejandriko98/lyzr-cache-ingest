@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from lyzr.client import LyzrClient
+from lyzr import LyzrClient
 from datetime import datetime
 import os
 
