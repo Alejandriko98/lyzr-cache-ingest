@@ -138,7 +138,7 @@ La respuesta debe justificar que el usuario esté pagando por un asesor senior.
 """
     else:
         model = "gpt-4o-mini"
-        ttl = 60 * 60 * 24  # 24 horas
+        ttl = 60 * 60 * 24 * 7  # 7 días
         system_prompt = """
 Eres AITAX, un asistente fiscal experto en España para autónomos y pequeños negocios.
 
