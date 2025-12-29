@@ -36,16 +36,21 @@ def root():
 # ---------- ENDPOINT PRINCIPAL ----------
 @app.post("/ask")
 def ask(q: Question):
+     redis_client.incr("metrics:total_requests")
+    
     cache_key = make_cache_key(q.query, q.mode)
 
     # 1️⃣ INTENTAR CACHE
     cached_answer = redis_client.get(cache_key)
     if cached_answer:
+            redis_client.incr("metrics:cache_hits")
         return {
             "mode": q.mode,
             "cached": True,
             "answer": cached_answer
         }
+redis_client.incr("metrics:cache_misses")
+
 
     # 2️⃣ SELECCIÓN DE MODELO Y PROMPT
     if q.mode == "pro":
@@ -171,6 +176,11 @@ REGLAS:
     answer = response.choices[0].message.content
     usage = response.usage
 
+    redis_client.incrby(
+        "metrics:tokens_used",
+        usage.total_tokens
+)
+
     # 4️⃣ GUARDAR EN REDIS
     redis_client.setex(cache_key, ttl, answer)
 
@@ -186,4 +196,13 @@ REGLAS:
         "cached": False,
         "answer": answer,
         "tokens_used": usage.total_tokens
+    }
+
+@app.get("/metrics")
+def metrics():
+    return {
+        "total_requests": int(redis_client.get("metrics:total_requests") or 0),
+        "cache_hits": int(redis_client.get("metrics:cache_hits") or 0),
+        "cache_misses": int(redis_client.get("metrics:cache_misses") or 0),
+        "tokens_used": int(redis_client.get("metrics:tokens_used") or 0),
     }
