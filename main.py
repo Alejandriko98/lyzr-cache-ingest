@@ -4,16 +4,18 @@ from openai import OpenAI
 import os
 import redis
 import hashlib
+import httpx
 
 # ---------- CONFIG ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-REDIS_URL = os.getenv("REDIS_URL")  # ej: redis://:password@host:port
+REDIS_URL = os.getenv("REDIS_URL")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 redis_client = redis.from_url(
     REDIS_URL,
-    decode_responses=True  # strings en vez de bytes
+    decode_responses=True
 )
 
 app = FastAPI()
@@ -28,10 +30,47 @@ def make_cache_key(query: str, mode: str) -> str:
     raw = f"{mode}:{query.lower().strip()}"
     return "aitax:" + hashlib.sha256(raw.encode()).hexdigest()
 
+NEEDS_WEBSEARCH_KEYWORDS = [
+    "deducir", "deducción", "deducible",
+    "2024", "2025", "actualizado", "nuevo",
+    "plazo", "fecha límite", "tipo impositivo",
+    "modelo", "boe",
+    "andaluc", "catalu", "madrid", "valencia"
+]
+
+def needs_websearch(query: str) -> bool:
+    q = query.lower()
+    return any(k in q for k in NEEDS_WEBSEARCH_KEYWORDS)
+
+def serper_search(query: str) -> str:
+    url = "https://google.serper.dev/search"
+    headers = {
+        "X-API-KEY": SERPER_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "q": query,
+        "gl": "es",
+        "hl": "es",
+        "num": 5
+    }
+
+    with httpx.Client(timeout=10) as client_http:
+        r = client_http.post(url, headers=headers, json=payload)
+        r.raise_for_status()
+        data = r.json()
+
+    snippets = []
+    for item in data.get("organic", []):
+        if "snippet" in item:
+            snippets.append(item["snippet"])
+
+    return "\n".join(snippets[:5])
+
 # ---------- HEALTH CHECK ----------
 @app.get("/")
 def root():
-    return {"status": "AITAX agent running with Redis cache"}
+    return {"status": "AITAX agent running with Redis + Serper"}
 
 # ---------- ENDPOINT PRINCIPAL ----------
 @app.post("/ask")
@@ -41,7 +80,14 @@ def ask(q: Question):
 
     cache_key = make_cache_key(q.query, q.mode)
 
-    # 1️⃣ INTENTAR CACHE
+    # Decidir si usar websearch
+    use_websearch = needs_websearch(q.query)
+    web_context = None
+
+    if use_websearch:
+        web_context = serper_search(q.query)
+
+    # 1️⃣ CACHE
     cached_answer = redis_client.get(cache_key)
     if cached_answer:
         redis_client.incr("metrics:cache_hits")
@@ -51,7 +97,6 @@ def ask(q: Question):
             "answer": cached_answer
         }
 
-    # Cache miss
     redis_client.incr("metrics:cache_misses")
 
     # 2️⃣ SELECCIÓN DE MODELO Y PROMPT
@@ -161,23 +206,34 @@ ESTILO:
 - Sin frases tipo “consulta con un asesor”
 """
 
-    # 3️⃣ LLAMADA A OPENAI
+    # 3️⃣ MENSAJES
+    messages = [
+        {"role": "system", "content": system_prompt.strip()}
+    ]
+
+    if web_context:
+        messages.append({
+            "role": "system",
+            "content": f"INFORMACIÓN ACTUALIZADA (fuentes oficiales):\n{web_context}"
+        })
+
+    messages.append({
+        "role": "user",
+        "content": q.query
+    })
+
+    # 4️⃣ LLAMADA A OPENAI
     response = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system_prompt.strip()},
-            {"role": "user", "content": q.query}
-        ],
+        messages=messages,
         temperature=0.2
     )
 
     answer = response.choices[0].message.content
     usage = response.usage
 
-    # 4️⃣ GUARDAR EN REDIS
+    # 5️⃣ GUARDAR EN REDIS
     redis_client.setex(cache_key, ttl, answer)
-
-    # 5️⃣ MÉTRICA DE TOKENS
     redis_client.incrby("metrics:tokens_used", usage.total_tokens)
 
     # LOGS
@@ -194,6 +250,7 @@ ESTILO:
         "tokens_used": usage.total_tokens
     }
 
+# ---------- MÉTRICAS ----------
 @app.get("/metrics")
 def metrics():
     return {
